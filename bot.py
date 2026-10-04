@@ -12,12 +12,12 @@ from storage import (
 )
 
 # ============================================================
-# НАСТРОЙКИ БОТА
+# НАСТРОЙКИ
 # ============================================================
 
 intents = discord.Intents.default()
-# message_content НЕ включаем — для слеш-команд он не нужен,
-# и без него бот не будет требовать Privileged Intent в портале.
+# message_content НЕ включаем — не нужен для слеш-команд,
+# и без него не будет PrivilegedIntentsRequired.
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
@@ -28,7 +28,6 @@ tree = bot.tree
 # ============================================================
 
 def has_admin_role(interaction: discord.Interaction) -> bool:
-    """Проверяет, есть ли у пользователя админ-роль."""
     if not interaction.guild:
         return False
     member = interaction.guild.get_member(interaction.user.id)
@@ -38,24 +37,21 @@ def has_admin_role(interaction: discord.Interaction) -> bool:
 
 
 def debug_roles(interaction: discord.Interaction):
-    """Выводит в логи информацию о ролях пользователя — для отладки."""
+    """Печатает роли в логи — для отладки."""
     member = interaction.guild.get_member(interaction.user.id) if interaction.guild else None
     print("=" * 60)
-    print(f"🔍 Команда вызвана: {interaction.command.name if interaction.command else '?'}")
     print(f"🔍 guild:  {interaction.guild}")
     print(f"🔍 user:   {interaction.user} (id={interaction.user.id})")
     print(f"🔍 member: {member}")
     if member:
-        roles = [(r.name, r.id) for r in member.roles]
-        print(f"🔍 roles:  {roles}")
-        print(f"🔍 ищу:    ADMIN_ROLE_ID={ADMIN_ROLE_ID}")
+        print(f"🔍 roles:  {[(r.name, r.id) for r in member.roles]}")
+        print(f"🔍 ищу:    {ADMIN_ROLE_ID}")
         print(f"🔍 есть:   {ADMIN_ROLE_ID in [r.id for r in member.roles]}")
-    print(f"🔍 итог has_admin_role: {has_admin_role(interaction)}")
+    print(f"🔍 итог:   {has_admin_role(interaction)}")
     print("=" * 60)
 
 
 async def deny(interaction: discord.Interaction):
-    """Отправляет отказ в правах."""
     if interaction.response.is_done():
         await interaction.followup.send("❌ У вас нет прав для этой команды!", ephemeral=True)
     else:
@@ -67,7 +63,7 @@ async def deny(interaction: discord.Interaction):
 # ============================================================
 
 @tree.command(name="money-drop", description="Выдать деньги пользователю")
-@app_commands.describe(amount="Сколько монет выдать", member="Кому (по умолчанию — вы)")
+@app_commands.describe(amount="Сколько монет", member="Кому (по умолчанию — вы)")
 async def money_drop(interaction: discord.Interaction, amount: int, member: discord.Member = None):
     debug_roles(interaction)
     if not has_admin_role(interaction):
@@ -180,7 +176,7 @@ async def tree_grow_up(
 
 @tree.command(name="chests", description="Показать ваши сундуки и удобрения")
 async def chests(interaction: discord.Interaction):
-    inv = await get_inventory(interaction.user.id)
+    inv = await get_inventory(interaction.user.id)   # ← await!
 
     chest_list = [i for i in inv if i["type"] == "chest"]
     fert_list = [i for i in inv if i["type"] == "fertilizer"]
@@ -203,7 +199,7 @@ async def chests(interaction: discord.Interaction):
 
 @tree.command(name="tree", description="Показать ваше дерево и баланс")
 async def tree_info(interaction: discord.Interaction):
-    data = await get_user(interaction.user.id)
+    data = await get_user(interaction.user.id)   # ← await!
 
     embed = discord.Embed(title="🌳 Ваше дерево", color=discord.Color.green())
     embed.add_field(name="Уровень дерева", value=f"**{data['tree_level']}**", inline=True)
@@ -220,8 +216,8 @@ async def tree_info(interaction: discord.Interaction):
 async def on_ready():
     await init_db()
     await tree.sync()
-    print(f"✅ Бот {bot.user} запущен и готов к работе!")
-    print(f"📋 Зарегистрировано команд: {len(tree.get_commands())}")
+    print(f"✅ Бот {bot.user} запущен!")
+    print(f"📋 Команд зарегистрировано: {len(tree.get_commands())}")
 
 
 @bot.event
@@ -230,21 +226,21 @@ async def on_disconnect():
 
 
 # ============================================================
-# ЗАПУСК С ДИАГНОСТИКОЙ
+# ЗАПУСК С ДИАГНОСТИКОЙ ТОКЕНА
 # ============================================================
 
 if __name__ == "__main__":
     raw = os.environ.get("DISCORD_TOKEN", "")
-    print(f"🔍 ENV     : длина={len(raw)}, начало={raw[:8]!r}, конец={raw[-4:]!r}")
+    print(f"🔍 ENV    : длина={len(raw)}, начало={raw[:8]!r}, конец={raw[-4:]!r}")
     if TOKEN:
-        print(f"🔍 CONFIG  : длина={len(TOKEN)}, начало={TOKEN[:8]!r}, конец={TOKEN[-4:]!r}")
-        print(f"🔍 MATCH   : {'✅ да' if TOKEN == raw else '❌ НЕТ (config != env)'}")
+        print(f"🔍 CONFIG : длина={len(TOKEN)}, начало={TOKEN[:8]!r}, конец={TOKEN[-4:]!r}")
+        print(f"🔍 MATCH  : {'✅ да' if TOKEN == raw else '❌ НЕТ'}")
     else:
-        print("🔍 CONFIG  : None")
+        print("🔍 CONFIG : None")
 
     if not TOKEN:
-        raise SystemExit("❌ DISCORD_TOKEN пустой — проверь переменные окружения в Railway!")
+        raise SystemExit("❌ DISCORD_TOKEN пустой!")
     if len(TOKEN) < 50:
-        raise SystemExit(f"❌ DISCORD_TOKEN слишком короткий ({len(TOKEN)} символов) — это не токен бота!")
+        raise SystemExit(f"❌ DISCORD_TOKEN короткий: {len(TOKEN)} символов")
 
     bot.run(TOKEN)
