@@ -16,6 +16,8 @@ from storage import (
 # ============================================================
 
 intents = discord.Intents.default()
+intents.members = True          # ← добавить
+intents.message_content = True  # ← добавить, чтобы не было warning
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
