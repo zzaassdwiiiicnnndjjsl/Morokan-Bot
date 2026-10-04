@@ -260,7 +260,6 @@ async def build_chests_embed(user_id: int, user: discord.User = None) -> discord
 # ============================================================
 # МЕНЮ ДЕРЕВА
 # ============================================================
-
 class TreeView(discord.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=180)
@@ -319,12 +318,15 @@ async def build_tree_embed(user_id: int, user: discord.User = None) -> discord.E
     fert_map = {f["name"]: f["quantity"] for f in inv if f["type"] == "fertilizer"}
 
     fert_text = "\n".join(
-        f"🌱 {name}: **{qty}**" for name, qty in fert_map.items()
+        f"{_fert_emoji(name)} {name}: **{qty}**" for name, qty in fert_map.items()
     ) or "Пусто"
+
+    luck = calc_luck(data["tree_level"])
 
     embed = discord.Embed(title="🌳 Ваше дерево", color=discord.Color.green())
     embed.add_field(name="Уровень дерева", value=f"**{data['tree_level']}**", inline=True)
     embed.add_field(name="💰 Баланс", value=f"**{data['money']}** монет", inline=True)
+    embed.add_field(name="🍀 Удача", value=f"**×{luck:.2f}**", inline=True)
     embed.add_field(name="🌱 Удобрения", value=fert_text, inline=False)
     if user:
         embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
