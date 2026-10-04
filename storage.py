@@ -1,33 +1,25 @@
 import random
 from config import CHEST_TYPES, FERTILIZER_TYPES
 
-# ============ ХРАНИЛИЩЕ В ПАМЯТИ ============
-# users = { user_id: {"money": int, "tree_level": int} }
 _users: dict[int, dict] = {}
-
-# inventory = { user_id: { (item_type, item_name): quantity } }
 _inventory: dict[int, dict[tuple[str, str], int]] = {}
 
 
-def init_db():
-    """Заглушка для совместимости с bot.py"""
+async def init_db():
     print("✅ Хранилище в памяти готово")
 
 
-def close_db():
-    """Заглушка для совместимости"""
+async def close_db():
     pass
 
 
-# ============ USERS ============
-
-def get_user(user_id: int) -> dict:
+async def get_user(user_id: int) -> dict:
     if user_id not in _users:
         _users[user_id] = {"money": 0, "tree_level": 0}
     return _users[user_id].copy()
 
 
-def update_user(user_id: int, money: int = None, tree_level: int = None):
+async def update_user(user_id: int, money: int = None, tree_level: int = None):
     if user_id not in _users:
         _users[user_id] = {"money": 0, "tree_level": 0}
     if money is not None:
@@ -36,17 +28,16 @@ def update_user(user_id: int, money: int = None, tree_level: int = None):
         _users[user_id]["tree_level"] += tree_level
 
 
-# ============ INVENTORY ============
-def get_inventory(user_id: int) -> list:
+async def get_inventory(user_id: int) -> list:
     items = _inventory.get(user_id, {})
     return [
-        {"type": item_type, "name": item_name, "quantity": qty}
-        for (item_type, item_name), qty in items.items()
-        if qty > 0
+        {"type": t, "name": n, "quantity": q}
+        for (t, n), q in items.items()
+        if q > 0
     ]
 
 
-def add_item(user_id: int, item_type: str, item_name: str, quantity: int):
+async def add_item(user_id: int, item_type: str, item_name: str, quantity: int):
     if quantity <= 0:
         return
     if user_id not in _inventory:
@@ -55,7 +46,7 @@ def add_item(user_id: int, item_type: str, item_name: str, quantity: int):
     _inventory[user_id][key] = _inventory[user_id].get(key, 0) + quantity
 
 
-def remove_item(user_id: int, item_type: str, item_name: str, quantity: int) -> bool:
+async def remove_item(user_id: int, item_type: str, item_name: str, quantity: int) -> bool:
     if quantity <= 0:
         return False
     key = (item_type, item_name)
@@ -66,16 +57,18 @@ def remove_item(user_id: int, item_type: str, item_name: str, quantity: int) -> 
     return True
 
 
-def get_item_quantity(user_id: int, item_type: str, item_name: str) -> int:
+async def get_item_quantity(user_id: int, item_type: str, item_name: str) -> int:
     return _inventory.get(user_id, {}).get((item_type, item_name), 0)
 
 
-# ============ ИГРОВАЯ ЛОГИКА ============
-
-def drop_chest_reward(user_id: int, count: int) -> list:
+async def drop_chest_reward(user_id: int, count: int) -> list:
     rewards = []
     for _ in range(count):
-        r = random.choice(["money", "chest", "fertilizer"])
+        r = random.choices(
+            ["money", "chest", "fertilizer"],
+            weights=[60, 25, 15],
+            k=1,
+        )[0]
         if r == "money":
             amt = random.randint(10, 100)
             await update_user(user_id, money=amt)
