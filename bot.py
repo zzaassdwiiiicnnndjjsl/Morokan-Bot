@@ -16,8 +16,8 @@ from storage import (
 # ============================================================
 
 intents = discord.Intents.default()
-intents.members = True          # для get_member()
-intents.message_content = True  # чтобы не было warning
+intents.members = True
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
@@ -55,6 +55,15 @@ async def deny(interaction: discord.Interaction):
         await interaction.followup.send("❌ У вас нет прав для этой команды!")
     else:
         await interaction.response.send_message("❌ У вас нет прав для этой команды!")
+
+
+def _chest_emoji(name: str) -> str:
+    return {
+        "Common": "🎁",
+        "Mega": "📦",
+        "Ultra": "💎",
+        "Super": "⚡",
+    }.get(name, "📦")
 
 
 # ============================================================
@@ -116,7 +125,6 @@ class ChestView(discord.ui.View):
         return True
 
     async def _show_choice(self, interaction: discord.Interaction, chest_type: str):
-        """Показывает подменю выбора для конкретного типа сундука."""
         qty = await get_item_quantity(self.user_id, "chest", chest_type)
         if qty <= 0:
             await interaction.response.send_message(
@@ -161,29 +169,61 @@ class ChestView(discord.ui.View):
 
         rewards = await drop_chest_reward(self.user_id, count)
 
-        grouped: dict[str, int] = {}
+        # Группируем награды
+        money_total = 0
+        chest_rewards: dict[str, int] = {}
+        fert_rewards: dict[str, int] = {}
+
         for r in rewards:
-            grouped[r] = grouped.get(r, 0) + 1
+            if r["kind"] == "money":
+                money_total += r["amount"]
+            elif r["kind"] == "chest":
+                chest_rewards[r["name"]] = chest_rewards.get(r["name"], 0) + r["amount"]
+            elif r["kind"] == "fertilizer":
+                fert_rewards[r["name"]] = fert_rewards.get(r["name"], 0) + r["amount"]
 
-        reward_text = "\n".join(
-            f"{r} × {c}" if c > 1 else r
-            for r, c in grouped.items()
-        )
-
-        title = f"🎉 Открыто: **{count}x {chest_type}**"
+        emoji = _chest_emoji(chest_type)
 
         reward_embed = discord.Embed(
-            title=title,
-            description=f"**Выпало:**\n{reward_text}",
+            title=f"{emoji} Открыто: {count}x {chest_type}",
             color=discord.Color.gold(),
         )
-        reward_embed.set_footer(text=f"Игрок: {interaction.user.display_name}")
+        reward_embed.set_author(
+            name=interaction.user.display_name,
+            icon_url=interaction.user.display_avatar.url,
+        )
 
-        # Возвращаемся в главное меню сундуков
+        if money_total > 0:
+            reward_embed.add_field(
+                name="💰 Деньги",
+                value=f"**+{money_total}** монет",
+                inline=False,
+            )
+
+        if chest_rewards:
+            chest_text = "\n".join(
+                f"{_chest_emoji(name)} {name}: **+{qty}**"
+                for name, qty in chest_rewards.items()
+            )
+            reward_embed.add_field(name="📦 Сундуки", value=chest_text, inline=False)
+
+        if fert_rewards:
+            fert_text = "\n".join(
+                f"🌱 {name}: **+{qty}**"
+                for name, qty in fert_rewards.items()
+            )
+            reward_embed.add_field(name="🌱 Удобрения", value=fert_text, inline=False)
+
+        if not money_total and not chest_rewards and not fert_rewards:
+            reward_embed.description = "😔 Ничего не выпало..."
+
+        reward_embed.set_footer(text=f"Всего наград: {len(rewards)}")
+
+        # Обновляем меню сундуков
         new_embed = await build_chests_embed(self.user_id, interaction.user)
         await interaction.response.edit_message(embed=new_embed, view=ChestView(self.user_id))
 
-        # Награды — публично
+        # Результаты — публично
         await interaction.followup.send(embed=reward_embed)
 
 
@@ -408,10 +448,7 @@ async def balance(interaction: discord.Interaction, member: discord.Member = Non
     target = member or interaction.user
     data = await get_user(target.id)
 
-    embed = discord.Embed(
-        title="💰 Баланс",
-        color=discord.Color.gold(),
-    )
+    embed = discord.Embed(title="💰 Баланс", color=discord.Color.gold())
     embed.set_author(name=target.display_name, icon_url=target.display_avatar.url)
     embed.add_field(name="Монеты", value=f"**{data['money']}** 💰", inline=False)
     await interaction.response.send_message(embed=embed)
