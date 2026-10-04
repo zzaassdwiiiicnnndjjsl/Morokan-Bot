@@ -66,6 +66,19 @@ def _chest_emoji(name: str) -> str:
     }.get(name, "📦")
 
 
+def _fert_emoji(name: str) -> str:
+    return {
+        "Fast": "🌱",
+        "Fast x2": "🌿",
+        "Fast x4": "🍀",
+    }.get(name, "🌱")
+
+
+def calc_luck(tree_level: int) -> float:
+    """Бонус удачи от уровня дерева. Максимум ×5."""
+    return min(1 + tree_level * 0.02, 5.0)
+
+
 # ============================================================
 # ПОДМЕНЮ: Открыть 1 / Открыть все
 # ============================================================
@@ -132,7 +145,7 @@ class ChestView(discord.ui.View):
             return
 
         embed = discord.Embed(
-            title=f"🎁 Открыть {chest_type}",
+            title=f"{_chest_emoji(chest_type)} Открыть {chest_type}",
             description=f"У вас **{qty}** шт. Что будем делать?",
             color=discord.Color.gold(),
         )
@@ -156,8 +169,7 @@ class ChestView(discord.ui.View):
         await self._show_choice(interaction, "Super")
 
     async def _open(self, interaction: discord.Interaction, chest_type: str, count: int):
-        """Открывает count сундуков указанного типа."""
-        # ← ГЛАВНЫЙ ФИКС: сразу подтверждаем interaction, снимаем 3-секундный таймаут
+        """Открывает count сундуков указанного типа с учётом удачи."""
         await interaction.response.defer()
 
         ok = await remove_item(self.user_id, "chest", chest_type, count)
@@ -183,6 +195,10 @@ class ChestView(discord.ui.View):
             elif r["kind"] == "fertilizer":
                 fert_rewards[r["name"]] = fert_rewards.get(r["name"], 0) + r["amount"]
 
+        # Получаем уровень дерева для показа удачи
+        user_data = await get_user(self.user_id)
+        luck = calc_luck(user_data["tree_level"])
+
         emoji = _chest_emoji(chest_type)
 
         reward_embed = discord.Embed(
@@ -194,33 +210,42 @@ class ChestView(discord.ui.View):
             icon_url=interaction.user.display_avatar.url,
         )
 
+        # Деньги
         if money_total > 0:
             reward_embed.add_field(
                 name="💰 Деньги",
-                value=f"**+{money_total}** монет",
+                value=f"💰 Монеты × **{money_total}**",
                 inline=False,
             )
 
+        # Сундуки — сортируем по редкости
         if chest_rewards:
+            order = {"Common": 0, "Mega": 1, "Ultra": 2, "Super": 3}
+            sorted_chests = sorted(chest_rewards.items(), key=lambda x: order.get(x[0], 99))
             chest_text = "\n".join(
-                f"{_chest_emoji(name)} {name}: **+{qty}**"
-                for name, qty in chest_rewards.items()
+                f"{_chest_emoji(name)} {name} × **{qty}**"
+                for name, qty in sorted_chests
             )
             reward_embed.add_field(name="📦 Сундуки", value=chest_text, inline=False)
 
+        # Удобрения — сортируем по силе
         if fert_rewards:
+            order = {"Fast": 0, "Fast x2": 1, "Fast x4": 2}
+            sorted_fert = sorted(fert_rewards.items(), key=lambda x: order.get(x[0], 99))
             fert_text = "\n".join(
-                f"🌱 {name}: **+{qty}**"
-                for name, qty in fert_rewards.items()
+                f"{_fert_emoji(name)} {name} × **{qty}**"
+                for name, qty in sorted_fert
             )
             reward_embed.add_field(name="🌱 Удобрения", value=fert_text, inline=False)
 
         if not money_total and not chest_rewards and not fert_rewards:
             reward_embed.description = "😔 Ничего не выпало..."
 
-        reward_embed.set_footer(text=f"Всего наград: {len(rewards)}")
+        reward_embed.set_footer(
+            text=f"Всего наград: {len(rewards)} • Удача: ×{luck:.2f}"
+        )
 
-        # ← ВАЖНО: после defer нельзя edit_message — только edit_original_response
+        # Обновляем меню сундуков
         new_embed = await build_chests_embed(self.user_id, interaction.user)
         await interaction.edit_original_response(
             embed=new_embed, view=ChestView(self.user_id)
@@ -240,6 +265,9 @@ async def build_chests_embed(user_id: int, user: discord.User = None) -> discord
     super_ = chest_map.get("Super", 0)
     total = common + mega + ultra + super_
 
+    data = await get_user(user_id)
+    luck = calc_luck(data["tree_level"])
+
     embed = discord.Embed(
         title="📦 Ваши сундуки",
         description=(
@@ -247,7 +275,8 @@ async def build_chests_embed(user_id: int, user: discord.User = None) -> discord
             f"📦 Mega: **{mega}**\n"
             f"💎 Ultra: **{ultra}**\n"
             f"⚡ Super: **{super_}**\n"
-            f"\n**Всего: {total}**"
+            f"\n**Всего: {total}**\n"
+            f"🍀 Удача: **×{luck:.2f}** (от дерева)"
         ),
         color=discord.Color.gold(),
     )
@@ -260,6 +289,7 @@ async def build_chests_embed(user_id: int, user: discord.User = None) -> discord
 # ============================================================
 # МЕНЮ ДЕРЕВА
 # ============================================================
+
 class TreeView(discord.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=180)
@@ -475,19 +505,25 @@ async def inventory(interaction: discord.Interaction):
     chest_map = {c["name"]: c["quantity"] for c in inv if c["type"] == "chest"}
     fert_map = {f["name"]: f["quantity"] for f in inv if f["type"] == "fertilizer"}
 
+    luck = calc_luck(data["tree_level"])
+
     embed = discord.Embed(title="🎒 Инвентарь", color=discord.Color.purple())
     embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
 
     embed.add_field(
         name="📊 Общее",
-        value=f"💰 Монеты: **{data['money']}**\n🌳 Уровень дерева: **{data['tree_level']}**",
+        value=(
+            f"💰 Монеты: **{data['money']}**\n"
+            f"🌳 Уровень дерева: **{data['tree_level']}**\n"
+            f"🍀 Удача: **×{luck:.2f}**"
+        ),
         inline=False,
     )
 
     chest_text = "\n".join(f"📦 {name}: **{qty}**" for name, qty in chest_map.items()) or "Пусто"
     embed.add_field(name="🎁 Сундуки", value=chest_text, inline=False)
 
-    fert_text = "\n".join(f"🌱 {name}: **{qty}**" for name, qty in fert_map.items()) or "Пусто"
+    fert_text = "\n".join(f"{_fert_emoji(name)} {name}: **{qty}**" for name, qty in fert_map.items()) or "Пусто"
     embed.add_field(name="🌱 Удобрения", value=fert_text, inline=False)
 
     await interaction.response.send_message(embed=embed)
