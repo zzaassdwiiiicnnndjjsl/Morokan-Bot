@@ -118,19 +118,28 @@ async def get_item_quantity(user_id: int, item_type: str, item_name: str) -> int
 # ============ ИГРОВАЯ ЛОГИКА ============
 
 async def drop_chest_reward(user_id: int, count: int) -> list:
+    """Возвращает список наград в структурированном виде."""
     rewards = []
     for _ in range(count):
-        r = random.choices(["money", "chest", "fertilizer"], weights=[60, 25, 15], k=1)[0]
+        r = random.choices(
+            ["money", "chest", "fertilizer"],
+            weights=[60, 25, 15],
+            k=1,
+        )[0]
+
         if r == "money":
             amt = random.randint(10, 100)
             await update_user(user_id, money=amt)
-            rewards.append(f"💰 {amt} монет")
+            rewards.append({"kind": "money", "amount": amt})
+
         elif r == "chest":
             ct = random.choice(CHEST_TYPES)
             await add_item(user_id, "chest", ct, 1)
-            rewards.append(f"📦 Сундук {ct}")
+            rewards.append({"kind": "chest", "name": ct, "amount": 1})
+
         else:
             ft = random.choice(FERTILIZER_TYPES)
             await add_item(user_id, "fertilizer", ft, 1)
-            rewards.append(f"🌱 Удобрение {ft}")
+            rewards.append({"kind": "fertilizer", "name": ft, "amount": 1})
+
     return rewards
