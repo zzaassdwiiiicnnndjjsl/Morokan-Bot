@@ -118,28 +118,51 @@ async def get_item_quantity(user_id: int, item_type: str, item_name: str) -> int
 # ============ ИГРОВАЯ ЛОГИКА ============
 
 async def drop_chest_reward(user_id: int, count: int) -> list:
-    """Возвращает список наград в структурированном виде."""
+    """Возвращает список наград с учётом удачи от уровня дерева."""
+    # Получаем уровень дерева для бонуса удачи
+    user = await get_user(user_id)
+    tree_level = user["tree_level"]
+
+    # Бонус удачи: +2% к редким за каждый уровень дерева (макс. ×5)
+    luck_bonus = min(1 + tree_level * 0.02, 5.0)
+
+    # Базовые веса: чем реже предмет — тем меньше вес
+    # Порядок: money, Common, Mega, Ultra, Super, Fast, Fast x2, Fast x4
+    base_weights = [40, 30, 15, 8, 2, 3, 1.5, 0.5]
+
+    # Редкие получают буст удачи, обычные — нет
+    # Индексы: 0=money, 1=Common — обычные. 2-7 — редкие
+    weights = [
+        base_weights[0],                # деньги — без буста
+        base_weights[1] / luck_bonus,   # Common — реже с удачей
+        base_weights[2] * luck_bonus,   # Mega
+        base_weights[3] * luck_bonus,   # Ultra
+        base_weights[4] * luck_bonus,   # Super
+        base_weights[5] * luck_bonus,   # Fast
+        base_weights[6] * luck_bonus,   # Fast x2
+        base_weights[7] * luck_bonus,   # Fast x4
+    ]
+
     rewards = []
     for _ in range(count):
-        r = random.choices(
-            ["money", "chest", "fertilizer"],
-            weights=[60, 25, 15],
+        drop = random.choices(
+            ["money", "Common", "Mega", "Ultra", "Super",
+             "Fast", "Fast x2", "Fast x4"],
+            weights=weights,
             k=1,
         )[0]
 
-        if r == "money":
+        if drop == "money":
             amt = random.randint(10, 100)
             await update_user(user_id, money=amt)
             rewards.append({"kind": "money", "amount": amt})
 
-        elif r == "chest":
-            ct = random.choice(CHEST_TYPES)
-            await add_item(user_id, "chest", ct, 1)
-            rewards.append({"kind": "chest", "name": ct, "amount": 1})
+        elif drop in ("Common", "Mega", "Ultra", "Super"):
+            await add_item(user_id, "chest", drop, 1)
+            rewards.append({"kind": "chest", "name": drop, "amount": 1})
 
-        else:
-            ft = random.choice(FERTILIZER_TYPES)
-            await add_item(user_id, "fertilizer", ft, 1)
-            rewards.append({"kind": "fertilizer", "name": ft, "amount": 1})
+        else:  # Fast, Fast x2, Fast x4
+            await add_item(user_id, "fertilizer", drop, 1)
+            rewards.append({"kind": "fertilizer", "name": drop, "amount": 1})
 
     return rewards
