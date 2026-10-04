@@ -1,8 +1,7 @@
 import sqlite3
 import random
 from config import CHEST_TYPES, FERTILIZER_TYPES
-
-DB_NAME = "bot_data.db"
+from config import DB_NAME
 
 def init_db():
     """Инициализация базы данных"""
