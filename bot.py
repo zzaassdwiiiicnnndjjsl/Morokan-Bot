@@ -16,8 +16,9 @@ from storage import (
 # ============================================================
 
 intents = discord.Intents.default()
-intents.members = True          # ← добавить
-intents.message_content = True  # ← добавить, чтобы не было warning
+intents.members = True          # для get_member()
+intents.message_content = True  # чтобы не было warning
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
@@ -57,7 +58,47 @@ async def deny(interaction: discord.Interaction):
 
 
 # ============================================================
-# МЕНЮ СУНДУКОВ (для /chests)
+# ПОДМЕНЮ: Открыть 1 / Открыть все
+# ============================================================
+
+class OpenChoiceView(discord.ui.View):
+    """Подменю: открыть 1 сундук или все сундуки этого типа."""
+
+    def __init__(self, user_id: int, chest_type: str, parent_view: "ChestView"):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.chest_type = chest_type
+        self.parent_view = parent_view
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Это меню не для вас!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Открыть 1", emoji="1️⃣", style=discord.ButtonStyle.green)
+    async def open_one(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.parent_view._open(interaction, self.chest_type, count=1)
+
+    @discord.ui.button(label="Открыть все", emoji="🎁", style=discord.ButtonStyle.danger)
+    async def open_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        qty = await get_item_quantity(self.user_id, "chest", self.chest_type)
+        if qty <= 0:
+            await interaction.response.send_message(
+                f"❌ У вас нет сундуков типа **{self.chest_type}**!",
+                ephemeral=True,
+            )
+            return
+        await self.parent_view._open(interaction, self.chest_type, count=qty)
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await build_chests_embed(self.user_id, interaction.user)
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
+# ============================================================
+# ГЛАВНОЕ МЕНЮ СУНДУКОВ
 # ============================================================
 
 class ChestView(discord.ui.View):
@@ -69,54 +110,51 @@ class ChestView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "❌ Это меню не для вас! Откройте своё через `/chests`.",
-                ephemeral=True,  # ← тут оставляем ephemeral, чтобы чужие не мешали
+                ephemeral=True,
             )
             return False
         return True
 
-    @discord.ui.button(label="Обычный", emoji="🎁", style=discord.ButtonStyle.secondary)
-    async def open_common(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open(interaction, "Common")
-
-    @discord.ui.button(label="Mega", emoji="📦", style=discord.ButtonStyle.blurple)
-    async def open_mega(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open(interaction, "Mega")
-
-    @discord.ui.button(label="Ultra", emoji="💎", style=discord.ButtonStyle.blurple)
-    async def open_ultra(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open(interaction, "Ultra")
-
-    @discord.ui.button(label="Super", emoji="⚡", style=discord.ButtonStyle.blurple)
-    async def open_super(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open(interaction, "Super")
-
-    @discord.ui.button(label="Все Mega", emoji="🎁", style=discord.ButtonStyle.green)
-    async def open_all_mega(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open(interaction, "Mega", open_all=True)
-
-    @discord.ui.button(label="Все Ultra", emoji="🎁", style=discord.ButtonStyle.green)
-    async def open_all_ultra(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open(interaction, "Ultra", open_all=True)
-
-    @discord.ui.button(label="Все Super", emoji="🎁", style=discord.ButtonStyle.green)
-    async def open_all_super(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open(interaction, "Super", open_all=True)
-
-    async def _open(self, interaction: discord.Interaction, chest_type: str, open_all: bool = False):
+    async def _show_choice(self, interaction: discord.Interaction, chest_type: str):
+        """Показывает подменю выбора для конкретного типа сундука."""
         qty = await get_item_quantity(self.user_id, "chest", chest_type)
         if qty <= 0:
             await interaction.response.send_message(
                 f"❌ У вас нет сундуков типа **{chest_type}**!",
-                ephemeral=True,  # ошибки — ephemeral
+                ephemeral=True,
             )
             return
 
-        count = qty if open_all else 1
+        embed = discord.Embed(
+            title=f"🎁 Открыть {chest_type}",
+            description=f"У вас **{qty}** шт. Что будем делать?",
+            color=discord.Color.gold(),
+        )
+        sub_view = OpenChoiceView(self.user_id, chest_type, parent_view=self)
+        await interaction.response.edit_message(embed=embed, view=sub_view)
 
+    @discord.ui.button(label="Обычный", emoji="🎁", style=discord.ButtonStyle.secondary)
+    async def open_common(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_choice(interaction, "Common")
+
+    @discord.ui.button(label="Mega", emoji="📦", style=discord.ButtonStyle.blurple)
+    async def open_mega(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_choice(interaction, "Mega")
+
+    @discord.ui.button(label="Ultra", emoji="💎", style=discord.ButtonStyle.blurple)
+    async def open_ultra(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_choice(interaction, "Ultra")
+
+    @discord.ui.button(label="Super", emoji="⚡", style=discord.ButtonStyle.blurple)
+    async def open_super(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_choice(interaction, "Super")
+
+    async def _open(self, interaction: discord.Interaction, chest_type: str, count: int):
+        """Открывает count сундуков указанного типа."""
         ok = await remove_item(self.user_id, "chest", chest_type, count)
         if not ok:
             await interaction.response.send_message(
-                "❌ Не удалось списать сундук. Попробуйте ещё раз.",
+                f"❌ Не удалось списать **{count}x {chest_type}** — возможно, их уже нет.",
                 ephemeral=True,
             )
             return
@@ -132,7 +170,7 @@ class ChestView(discord.ui.View):
             for r, c in grouped.items()
         )
 
-        title = f"🎉 Открыто: **{count}x {chest_type}**" if open_all else f"🎉 Открыт **{chest_type}** сундук"
+        title = f"🎉 Открыто: **{count}x {chest_type}**"
 
         reward_embed = discord.Embed(
             title=title,
@@ -141,11 +179,11 @@ class ChestView(discord.ui.View):
         )
         reward_embed.set_footer(text=f"Игрок: {interaction.user.display_name}")
 
-        # Обновляем основное сообщение (публично)
+        # Возвращаемся в главное меню сундуков
         new_embed = await build_chests_embed(self.user_id, interaction.user)
-        await interaction.response.edit_message(embed=new_embed, view=self)
+        await interaction.response.edit_message(embed=new_embed, view=ChestView(self.user_id))
 
-        # Награды показываем ПУБЛИЧНО (без ephemeral)
+        # Награды — публично
         await interaction.followup.send(embed=reward_embed)
 
 
@@ -172,12 +210,12 @@ async def build_chests_embed(user_id: int, user: discord.User = None) -> discord
     )
     if user:
         embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
-    embed.set_footer(text="Нажмите кнопку, чтобы открыть сундук")
+    embed.set_footer(text="Нажмите на тип сундука, чтобы открыть")
     return embed
 
 
 # ============================================================
-# МЕНЮ ДЕРЕВА (для /tree)
+# МЕНЮ ДЕРЕВА
 # ============================================================
 
 class TreeView(discord.ui.View):
@@ -187,10 +225,7 @@ class TreeView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "❌ Это меню не для вас! Откройте своё через `/tree`.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("❌ Это меню не для вас!", ephemeral=True)
             return False
         return True
 
@@ -232,7 +267,7 @@ class TreeView(discord.ui.View):
         reward_embed.set_footer(text=f"Игрок: {interaction.user.display_name}")
 
         await interaction.response.edit_message(embed=new_embed, view=self)
-        await interaction.followup.send(embed=reward_embed)  # публично
+        await interaction.followup.send(embed=reward_embed)
 
 
 async def build_tree_embed(user_id: int, user: discord.User = None) -> discord.Embed:
@@ -244,10 +279,7 @@ async def build_tree_embed(user_id: int, user: discord.User = None) -> discord.E
         f"🌱 {name}: **{qty}**" for name, qty in fert_map.items()
     ) or "Пусто"
 
-    embed = discord.Embed(
-        title="🌳 Ваше дерево",
-        color=discord.Color.green(),
-    )
+    embed = discord.Embed(title="🌳 Ваше дерево", color=discord.Color.green())
     embed.add_field(name="Уровень дерева", value=f"**{data['tree_level']}**", inline=True)
     embed.add_field(name="💰 Баланс", value=f"**{data['money']}** монет", inline=True)
     embed.add_field(name="🌱 Удобрения", value=fert_text, inline=False)
@@ -367,14 +399,29 @@ async def tree_grow_up(interaction: discord.Interaction, amount: int, member: di
 async def chests(interaction: discord.Interaction):
     embed = await build_chests_embed(interaction.user.id, interaction.user)
     view = ChestView(interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view)  # публично
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+@tree.command(name="balance", description="Показать ваш баланс монет")
+@app_commands.describe(member="Чей баланс показать (по умолчанию — ваш)")
+async def balance(interaction: discord.Interaction, member: discord.Member = None):
+    target = member or interaction.user
+    data = await get_user(target.id)
+
+    embed = discord.Embed(
+        title="💰 Баланс",
+        color=discord.Color.gold(),
+    )
+    embed.set_author(name=target.display_name, icon_url=target.display_avatar.url)
+    embed.add_field(name="Монеты", value=f"**{data['money']}** 💰", inline=False)
+    await interaction.response.send_message(embed=embed)
 
 
 @tree.command(name="tree", description="Показать ваше дерево и использовать удобрения")
 async def tree_info(interaction: discord.Interaction):
     embed = await build_tree_embed(interaction.user.id, interaction.user)
     view = TreeView(interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view)  # публично
+    await interaction.response.send_message(embed=embed, view=view)
 
 
 @tree.command(name="inventory", description="Показать весь инвентарь")
@@ -386,34 +433,22 @@ async def inventory(interaction: discord.Interaction):
     chest_map = {c["name"]: c["quantity"] for c in inv if c["type"] == "chest"}
     fert_map = {f["name"]: f["quantity"] for f in inv if f["type"] == "fertilizer"}
 
-    embed = discord.Embed(
-        title="🎒 Инвентарь",
-        color=discord.Color.purple(),
-    )
+    embed = discord.Embed(title="🎒 Инвентарь", color=discord.Color.purple())
     embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
 
     embed.add_field(
         name="📊 Общее",
-        value=(
-            f"💰 Монеты: **{data['money']}**\n"
-            f"🌳 Уровень дерева: **{data['tree_level']}**"
-        ),
+        value=f"💰 Монеты: **{data['money']}**\n🌳 Уровень дерева: **{data['tree_level']}**",
         inline=False,
     )
 
-    if chest_map:
-        chest_text = "\n".join(f"📦 {name}: **{qty}**" for name, qty in chest_map.items())
-    else:
-        chest_text = "Пусто"
+    chest_text = "\n".join(f"📦 {name}: **{qty}**" for name, qty in chest_map.items()) or "Пусто"
     embed.add_field(name="🎁 Сундуки", value=chest_text, inline=False)
 
-    if fert_map:
-        fert_text = "\n".join(f"🌱 {name}: **{qty}**" for name, qty in fert_map.items())
-    else:
-        fert_text = "Пусто"
+    fert_text = "\n".join(f"🌱 {name}: **{qty}**" for name, qty in fert_map.items()) or "Пусто"
     embed.add_field(name="🌱 Удобрения", value=fert_text, inline=False)
 
-    await interaction.response.send_message(embed=embed)  # публично
+    await interaction.response.send_message(embed=embed)
 
 
 # ============================================================
