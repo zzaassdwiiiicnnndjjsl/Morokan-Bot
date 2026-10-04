@@ -71,8 +71,6 @@ def _chest_emoji(name: str) -> str:
 # ============================================================
 
 class OpenChoiceView(discord.ui.View):
-    """Подменю: открыть 1 сундук или все сундуки этого типа."""
-
     def __init__(self, user_id: int, chest_type: str, parent_view: "ChestView"):
         super().__init__(timeout=120)
         self.user_id = user_id
@@ -159,9 +157,12 @@ class ChestView(discord.ui.View):
 
     async def _open(self, interaction: discord.Interaction, chest_type: str, count: int):
         """Открывает count сундуков указанного типа."""
+        # ← ГЛАВНЫЙ ФИКС: сразу подтверждаем interaction, снимаем 3-секундный таймаут
+        await interaction.response.defer()
+
         ok = await remove_item(self.user_id, "chest", chest_type, count)
         if not ok:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ Не удалось списать **{count}x {chest_type}** — возможно, их уже нет.",
                 ephemeral=True,
             )
@@ -219,9 +220,11 @@ class ChestView(discord.ui.View):
 
         reward_embed.set_footer(text=f"Всего наград: {len(rewards)}")
 
-        # Обновляем меню сундуков
+        # ← ВАЖНО: после defer нельзя edit_message — только edit_original_response
         new_embed = await build_chests_embed(self.user_id, interaction.user)
-        await interaction.response.edit_message(embed=new_embed, view=ChestView(self.user_id))
+        await interaction.edit_original_response(
+            embed=new_embed, view=ChestView(self.user_id)
+        )
 
         # Результаты — публично
         await interaction.followup.send(embed=reward_embed)
