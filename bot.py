@@ -2,9 +2,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from config import TOKEN, ADMIN_ROLE_ID, CHEST_TYPES, FERTILIZER_TYPES
-from database import (
-    init_db, get_user, update_user, get_inventory, 
-    add_item, remove_item, drop_chest_reward
+from storage import (
+    init_db, close_db, get_user, update_user,
+    get_inventory, add_item, remove_item, drop_chest_reward,
 )
 
 # Инициализация бота
