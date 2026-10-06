@@ -737,4 +737,234 @@ async def give_chest(interaction: discord.Interaction, count: int,
     if not has_admin_role(interaction):
         return await deny(interaction)
     await add_item(member.id, "chest", chest_type.value, count)
-    await interaction
+    await interaction.response.send_message(
+        f"✅ {member.mention} получил **{count}x {chest_type.value}** сундук(ов)!"
+    )
+
+
+@tree.command(name="remove-chest", description="Удалить сундуки у пользователя")
+@app_commands.describe(count="Количество", chest_type="Тип сундука", member="Кому")
+@app_commands.choices(chest_type=[
+    app_commands.Choice(name="Обычный (Common)", value="Common"),
+    app_commands.Choice(name="Mega", value="Mega"),
+    app_commands.Choice(name="Ultra", value="Ultra"),
+    app_commands.Choice(name="Super", value="Super"),
+])
+async def remove_chest(interaction: discord.Interaction, count: int,
+                       chest_type: app_commands.Choice[str], member: discord.Member):
+    debug_roles(interaction)
+    if not has_admin_role(interaction):
+        return await deny(interaction)
+    ok = await remove_item(member.id, "chest", chest_type.value, count)
+    if ok:
+        await interaction.response.send_message(f"✅ У {member.mention} удалено **{count}x {chest_type.value}**!")
+    else:
+        await interaction.response.send_message(f"❌ У {member.mention} недостаточно **{chest_type.value}** сундуков!")
+
+
+@tree.command(name="tree-grow-up", description="Увеличить уровень дерева")
+@app_commands.describe(amount="Насколько увеличить", member="Кому (по умолчанию — вы)")
+async def tree_grow_up(interaction: discord.Interaction, amount: int, member: discord.Member = None):
+    debug_roles(interaction)
+    if not has_admin_role(interaction):
+        return await deny(interaction)
+    target = member or interaction.user
+    await update_user(target.id, tree_level=amount)
+    await interaction.response.send_message(f"✅ Дерево {target.mention} выросло на **{amount}** уровней!")
+
+
+@tree.command(name="set-money", description="Установить баланс пользователя")
+@app_commands.describe(amount="Новый баланс", member="Кому")
+async def set_money(interaction: discord.Interaction, amount: int, member: discord.Member):
+    if not has_admin_role(interaction):
+        return await deny(interaction)
+    await set_user_money(member.id, amount)
+    await interaction.response.send_message(f"✅ Баланс {member.mention} = **{amount}** монет")
+
+
+@tree.command(name="set-tree", description="Установить уровень дерева")
+@app_commands.describe(level="Новый уровень", member="Кому")
+async def set_tree(interaction: discord.Interaction, level: int, member: discord.Member):
+    if not has_admin_role(interaction):
+        return await deny(interaction)
+    await set_user_tree(member.id, level)
+    await interaction.response.send_message(f"✅ Дерево {member.mention} = **{level}**")
+
+
+@tree.command(name="set-luck", description="Установить бонус удачи магазина")
+@app_commands.describe(value="Новый бонус удачи (0-5)", member="Кому")
+async def set_luck(interaction: discord.Interaction, value: float, member: discord.Member):
+    if not has_admin_role(interaction):
+        return await deny(interaction)
+    await set_user_luck(member.id, value)
+    await interaction.response.send_message(f"✅ Бонус удачи {member.mention} = **+{value:.2f}**")
+
+
+# ============================================================
+# КОМАНДЫ УЧАСТНИКОВ
+# ============================================================
+
+@tree.command(name="chests", description="Показать и открыть ваши сундуки")
+async def chests(interaction: discord.Interaction):
+    embed = await build_chests_embed(interaction.user.id, interaction.user)
+    view = ChestView(interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+@tree.command(name="balance", description="Показать ваш баланс монет")
+@app_commands.describe(member="Чей баланс показать (по умолчанию — ваш)")
+async def balance(interaction: discord.Interaction, member: discord.Member = None):
+    target = member or interaction.user
+    data = await get_user(target.id)
+    embed = discord.Embed(title="💰 Баланс", color=discord.Color.gold())
+    embed.set_author(name=target.display_name, icon_url=target.display_avatar.url)
+    embed.add_field(name="Монеты", value=f"**{data['money']}** 💰", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="tree", description="Показать ваше дерево и использовать удобрения")
+async def tree_info(interaction: discord.Interaction):
+    embed = await build_tree_embed(interaction.user.id, interaction.user)
+    view = TreeView(interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+@tree.command(name="inventory", description="Показать весь инвентарь")
+async def inventory(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    data = await get_user(user_id)
+    inv = await get_inventory(user_id)
+
+    chest_map = {c["name"]: c["quantity"] for c in inv if c["type"] == "chest"}
+    fert_map = {f["name"]: f["quantity"] for f in inv if f["type"] == "fertilizer"}
+
+    luck = calc_luck(data["tree_level"], data.get("luck_bonus", 0.0))
+
+    embed = discord.Embed(title="🎒 Инвентарь", color=discord.Color.purple())
+    embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    embed.add_field(
+        name="📊 Общее",
+        value=(
+            f"💰 Монеты: **{data['money']}**\n"
+            f"🌳 Уровень дерева: **{data['tree_level']}**\n"
+            f"🍀 Удача: **×{luck:.2f}** (дерево + магазин)"
+        ),
+        inline=False,
+    )
+    chest_text = "\n".join(f"📦 {name}: **{qty}**" for name, qty in chest_map.items()) or "Пусто"
+    embed.add_field(name="🎁 Сундуки", value=chest_text, inline=False)
+    fert_text = "\n".join(f"{_fert_emoji(name)} {name}: **{qty}**" for name, qty in fert_map.items()) or "Пусто"
+    embed.add_field(name="🌱 Удобрения", value=fert_text, inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="store", description="Открыть магазин")
+async def store(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=build_store_main_embed(), view=StoreView(interaction.user.id))
+
+
+@tree.command(name="craft", description="Крафт — обменять 3 предмета на 1 редкий")
+async def craft(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=build_craft_embed(), view=CraftView(interaction.user.id))
+
+
+@tree.command(name="daily", description="Получить ежедневную награду")
+async def daily(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    data = await get_user(user_id)
+
+    last = data.get("last_daily")
+    now = datetime.now(timezone.utc)
+
+    if last is not None:
+        # если last_daily приходит как строка — конвертируем
+        if isinstance(last, str):
+            last = datetime.fromisoformat(last)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+
+        delta = now - last
+        if delta < timedelta(hours=DAILY_COOLDOWN_HOURS):
+            remaining = timedelta(hours=DAILY_COOLDOWN_HOURS) - delta
+            hours = int(remaining.total_seconds() // 3600)
+            minutes = int((remaining.total_seconds() % 3600) // 60)
+            await interaction.response.send_message(
+                f"⏳ Ежедневная награда уже получена! Следующая через **{hours}ч {minutes}м**.",
+                ephemeral=True,
+            )
+            return
+
+    await update_user(user_id, money=DAILY_REWARD)
+    await set_last_daily(user_id, now)
+
+    embed = discord.Embed(
+        title="🎁 Ежедневная награда!",
+        description=f"Вы получили **{DAILY_REWARD}** монет!\nВозвращайтесь через 24 часа.",
+        color=discord.Color.green(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="top", description="Топ игроков по балансу")
+async def top(interaction: discord.Interaction):
+    players = await get_top_players(10)
+    if not players:
+        await interaction.response.send_message("Пока нет игроков с балансом.")
+        return
+
+    lines = []
+    for i, p in enumerate(players, 1):
+        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"**{i}.**")
+        lines.append(f"{medal} <@{p['user_id']}> — 💰 **{p['money']}** (🌳 {p['tree_level']})")
+
+    embed = discord.Embed(
+        title="🏆 Топ игроков",
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+# ============================================================
+# СОБЫТИЯ
+# ============================================================
+
+@bot.event
+async def on_ready():
+    try:
+        await init_db()
+    except Exception as e:
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА init_db: {e}")
+        await bot.close()
+        return
+
+    try:
+        await tree.sync()
+    except Exception as e:
+        print(f"⚠️ Ошибка sync команд: {e}")
+
+    print(f"✅ Бот {bot.user} запущен!")
+    print(f"📋 Команд зарегистрировано: {len(tree.get_commands())}")
+
+
+@bot.event
+async def on_disconnect():
+    await close_db()
+
+
+# ============================================================
+# ЗАПУСК
+# ============================================================
+
+if __name__ == "__main__":
+    raw = os.environ.get("DISCORD_TOKEN", "")
+    print(f"🔍 ENV    : длина={len(raw)}, начало={raw[:8]!r}, конец={raw[-4:]!r}")
+    if TOKEN:
+        print(f"🔍 CONFIG : длина={len(TOKEN)}, начало={TOKEN[:8]!r}")
+        print(f"🔍 MATCH  : {'✅ да' if TOKEN == raw else '❌ НЕТ'}")
+    if not TOKEN:
+        raise SystemExit("❌ DISCORD_TOKEN пустой!")
+    if len(TOKEN) < 50:
+        raise SystemExit(f"❌ DISCORD_TOKEN короткий: {len(TOKEN)} символов")
+
+    bot.run(TOKEN)
