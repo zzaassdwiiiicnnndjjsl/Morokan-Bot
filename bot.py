@@ -219,7 +219,7 @@ class ChestView(discord.ui.View):
             )
             return
 
-        rewards = await drop_chest_reward(self.user_id, count)
+        rewards = await drop_chest_reward(self.user_id, chest_type, count)
 
         money_total = 0
         chest_rewards: dict[str, int] = {}
