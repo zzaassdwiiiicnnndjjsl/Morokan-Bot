@@ -1,4 +1,7 @@
 import os
+import random
+from datetime import datetime, timedelta, timezone
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -8,7 +11,8 @@ from storage import (
     init_db, close_db,
     get_user, update_user,
     get_inventory, add_item, remove_item, get_item_quantity,
-    drop_chest_reward,
+    drop_chest_reward, get_top_players,
+    set_user_luck, set_user_money, set_user_tree,
 )
 
 # ============================================================
@@ -24,7 +28,43 @@ tree = bot.tree
 
 
 # ============================================================
-# ПРОВЕРКА ПРАВ
+# КОНФИГ МАГАЗИНА
+# ============================================================
+
+SHOP_LUCK = {
+    "small":  {"name": "🍀 Удача +0.5", "price": 500,  "value": 0.5},
+    "medium": {"name": "🍀 Удача +2.0", "price": 2000, "value": 2.0},
+    "big":    {"name": "🍀 Удача +5.0", "price": 5000, "value": 5.0},
+}
+
+SHOP_CHESTS = {
+    "Common": {"name": "🎁 Обычный сундук", "price": 100,  "qty": 1},
+    "Mega":   {"name": "📦 Mega-сундук",    "price": 500,  "qty": 1},
+    "Ultra":  {"name": "💎 Ultra-сундук",   "price": 1500, "qty": 1},
+    "Super":  {"name": "⚡ Super-сундук",   "price": 5000, "qty": 1},
+}
+
+SHOP_FERT = {
+    "Fast":    {"name": "🌱 Fast",    "price": 200,  "qty": 1},
+    "Fast x2": {"name": "🌿 Fast x2", "price": 500,  "qty": 1},
+    "Fast x4": {"name": "🍀 Fast x4", "price": 1200, "qty": 1},
+}
+
+# Крафт: 3 предмета → 1 получше
+CRAFT_RECIPES = {
+    "Common":  {"need": 3, "give": "Mega",  "name": "🎁×3 → 📦 Mega"},
+    "Mega":    {"need": 3, "give": "Ultra", "name": "📦×3 → 💎 Ultra"},
+    "Ultra":   {"need": 3, "give": "Super", "name": "💎×3 → ⚡ Super"},
+    "Fast":    {"need": 3, "give": "Fast x2", "name": "🌱×3 → 🌿 Fast x2"},
+    "Fast x2": {"need": 3, "give": "Fast x4", "name": "🌿×3 → 🍀 Fast x4"},
+}
+
+DAILY_REWARD = 500
+DAILY_COOLDOWN_HOURS = 24
+
+
+# ============================================================
+# ХЕЛПЕРЫ
 # ============================================================
 
 def has_admin_role(interaction: discord.Interaction) -> bool:
@@ -58,25 +98,25 @@ async def deny(interaction: discord.Interaction):
 
 
 def _chest_emoji(name: str) -> str:
-    return {
-        "Common": "🎁",
-        "Mega": "📦",
-        "Ultra": "💎",
-        "Super": "⚡",
-    }.get(name, "📦")
+    return {"Common": "🎁", "Mega": "📦", "Ultra": "💎", "Super": "⚡"}.get(name, "📦")
 
 
 def _fert_emoji(name: str) -> str:
-    return {
-        "Fast": "🌱",
-        "Fast x2": "🌿",
-        "Fast x4": "🍀",
-    }.get(name, "🌱")
+    return {"Fast": "🌱", "Fast x2": "🌿", "Fast x4": "🍀"}.get(name, "🌱")
 
 
-def calc_luck(tree_level: int) -> float:
-    """Бонус удачи от уровня дерева. Максимум ×5."""
-    return min(1 + tree_level * 0.02, 5.0)
+def calc_luck(tree_level: int, shop_luck: float = 0.0) -> float:
+    """Итоговая удача: от дерева + купленная. Максимум ×10."""
+    tree_luck = min(1 + tree_level * 0.02, 5.0)
+    return min(tree_luck + shop_luck, 10.0)
+
+
+def _chest_order(name: str) -> int:
+    return {"Common": 0, "Mega": 1, "Ultra": 2, "Super": 3}.get(name, 99)
+
+
+def _fert_order(name: str) -> int:
+    return {"Fast": 0, "Fast x2": 1, "Fast x4": 2}.get(name, 99)
 
 
 # ============================================================
@@ -169,7 +209,6 @@ class ChestView(discord.ui.View):
         await self._show_choice(interaction, "Super")
 
     async def _open(self, interaction: discord.Interaction, chest_type: str, count: int):
-        """Открывает count сундуков указанного типа с учётом удачи."""
         await interaction.response.defer()
 
         ok = await remove_item(self.user_id, "chest", chest_type, count)
@@ -182,7 +221,6 @@ class ChestView(discord.ui.View):
 
         rewards = await drop_chest_reward(self.user_id, count)
 
-        # Группируем награды
         money_total = 0
         chest_rewards: dict[str, int] = {}
         fert_rewards: dict[str, int] = {}
@@ -195,9 +233,8 @@ class ChestView(discord.ui.View):
             elif r["kind"] == "fertilizer":
                 fert_rewards[r["name"]] = fert_rewards.get(r["name"], 0) + r["amount"]
 
-        # Получаем уровень дерева для показа удачи
         user_data = await get_user(self.user_id)
-        luck = calc_luck(user_data["tree_level"])
+        luck = calc_luck(user_data["tree_level"], user_data.get("luck_bonus", 0.0))
 
         emoji = _chest_emoji(chest_type)
 
@@ -210,7 +247,6 @@ class ChestView(discord.ui.View):
             icon_url=interaction.user.display_avatar.url,
         )
 
-        # Деньги
         if money_total > 0:
             reward_embed.add_field(
                 name="💰 Деньги",
@@ -218,20 +254,16 @@ class ChestView(discord.ui.View):
                 inline=False,
             )
 
-        # Сундуки — сортируем по редкости
         if chest_rewards:
-            order = {"Common": 0, "Mega": 1, "Ultra": 2, "Super": 3}
-            sorted_chests = sorted(chest_rewards.items(), key=lambda x: order.get(x[0], 99))
+            sorted_chests = sorted(chest_rewards.items(), key=lambda x: _chest_order(x[0]))
             chest_text = "\n".join(
                 f"{_chest_emoji(name)} {name} × **{qty}**"
                 for name, qty in sorted_chests
             )
             reward_embed.add_field(name="📦 Сундуки", value=chest_text, inline=False)
 
-        # Удобрения — сортируем по силе
         if fert_rewards:
-            order = {"Fast": 0, "Fast x2": 1, "Fast x4": 2}
-            sorted_fert = sorted(fert_rewards.items(), key=lambda x: order.get(x[0], 99))
+            sorted_fert = sorted(fert_rewards.items(), key=lambda x: _fert_order(x[0]))
             fert_text = "\n".join(
                 f"{_fert_emoji(name)} {name} × **{qty}**"
                 for name, qty in sorted_fert
@@ -245,13 +277,10 @@ class ChestView(discord.ui.View):
             text=f"Всего наград: {len(rewards)} • Удача: ×{luck:.2f}"
         )
 
-        # Обновляем меню сундуков
         new_embed = await build_chests_embed(self.user_id, interaction.user)
         await interaction.edit_original_response(
             embed=new_embed, view=ChestView(self.user_id)
         )
-
-        # Результаты — публично
         await interaction.followup.send(embed=reward_embed)
 
 
@@ -266,7 +295,7 @@ async def build_chests_embed(user_id: int, user: discord.User = None) -> discord
     total = common + mega + ultra + super_
 
     data = await get_user(user_id)
-    luck = calc_luck(data["tree_level"])
+    luck = calc_luck(data["tree_level"], data.get("luck_bonus", 0.0))
 
     embed = discord.Embed(
         title="📦 Ваши сундуки",
@@ -276,7 +305,7 @@ async def build_chests_embed(user_id: int, user: discord.User = None) -> discord
             f"💎 Ultra: **{ultra}**\n"
             f"⚡ Super: **{super_}**\n"
             f"\n**Всего: {total}**\n"
-            f"🍀 Удача: **×{luck:.2f}** (от дерева)"
+            f"🍀 Удача: **×{luck:.2f}**"
         ),
         color=discord.Color.gold(),
     )
@@ -317,8 +346,7 @@ class TreeView(discord.ui.View):
         qty = await get_item_quantity(self.user_id, "fertilizer", fert_type)
         if qty <= 0:
             await interaction.response.send_message(
-                f"❌ У вас нет удобрения **{fert_type}**!",
-                ephemeral=True,
+                f"❌ У вас нет удобрения **{fert_type}**!", ephemeral=True,
             )
             return
 
@@ -351,7 +379,7 @@ async def build_tree_embed(user_id: int, user: discord.User = None) -> discord.E
         f"{_fert_emoji(name)} {name}: **{qty}**" for name, qty in fert_map.items()
     ) or "Пусто"
 
-    luck = calc_luck(data["tree_level"])
+    luck = calc_luck(data["tree_level"], data.get("luck_bonus", 0.0))
 
     embed = discord.Embed(title="🌳 Ваше дерево", color=discord.Color.green())
     embed.add_field(name="Уровень дерева", value=f"**{data['tree_level']}**", inline=True)
@@ -365,6 +393,302 @@ async def build_tree_embed(user_id: int, user: discord.User = None) -> discord.E
 
 
 # ============================================================
+# МАГАЗИН
+# ============================================================
+
+def build_store_main_embed() -> discord.Embed:
+    return discord.Embed(
+        title="🛒 Магазин",
+        description=(
+            "Выберите категорию:\n\n"
+            "🍀 **Удача** — постоянный бонус к шансам редких дропов\n"
+            "📦 **Сундуки** — покупайте сундуки за монеты\n"
+            "🌱 **Удобрения** — быстрый рост дерева"
+        ),
+        color=discord.Color.gold(),
+    )
+
+
+def build_store_luck_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🍀 Магазин удачи",
+        description="Каждая покупка **постоянно** увеличивает удачу.\nСуммируется с бонусом от дерева.",
+        color=discord.Color.green(),
+    )
+    for item in SHOP_LUCK.values():
+        embed.add_field(name=item["name"], value=f"💰 **{item['price']}** монет", inline=False)
+    return embed
+
+
+def build_store_chests_embed() -> discord.Embed:
+    embed = discord.Embed(title="📦 Магазин сундуков", color=discord.Color.blurple())
+    for item in SHOP_CHESTS.values():
+        embed.add_field(name=item["name"], value=f"💰 **{item['price']}** монет", inline=False)
+    return embed
+
+
+def build_store_fert_embed() -> discord.Embed:
+    embed = discord.Embed(title="🌱 Магазин удобрений", color=discord.Color.green())
+    for item in SHOP_FERT.values():
+        embed.add_field(name=item["name"], value=f"💰 **{item['price']}** монет", inline=False)
+    return embed
+
+
+class StoreView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Это меню не для вас!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Удача", emoji="🍀", style=discord.ButtonStyle.green)
+    async def shop_luck(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_store_luck_embed(), view=LuckShopView(self.user_id))
+
+    @discord.ui.button(label="Сундуки", emoji="📦", style=discord.ButtonStyle.blurple)
+    async def shop_chests(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_store_chests_embed(), view=ChestShopView(self.user_id))
+
+    @discord.ui.button(label="Удобрения", emoji="🌱", style=discord.ButtonStyle.green)
+    async def shop_fert(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_store_fert_embed(), view=FertShopView(self.user_id))
+
+
+class LuckShopView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Это меню не для вас!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="+0.5 удачи", emoji="🍀", style=discord.ButtonStyle.green)
+    async def buy_small(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, "small")
+
+    @discord.ui.button(label="+2.0 удачи", emoji="🍀", style=discord.ButtonStyle.green)
+    async def buy_medium(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, "medium")
+
+    @discord.ui.button(label="+5.0 удачи", emoji="🍀", style=discord.ButtonStyle.green)
+    async def buy_big(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, "big")
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_store_main_embed(), view=StoreView(self.user_id))
+
+    async def _buy(self, interaction: discord.Interaction, key: str):
+        item = SHOP_LUCK[key]
+        user = await get_user(self.user_id)
+
+        if user["money"] < item["price"]:
+            await interaction.response.send_message(
+                f"❌ Недостаточно монет! Нужно **{item['price']}**, у вас **{user['money']}**.",
+                ephemeral=True,
+            )
+            return
+
+        await update_user(self.user_id, money=-item["price"], luck_bonus=item["value"])
+        new_user = await get_user(self.user_id)
+
+        embed = discord.Embed(
+            title="✅ Покупка успешна!",
+            description=(
+                f"Куплено: **{item['name']}**\n"
+                f"Баланс: 💰 **{new_user['money']}**\n"
+                f"Бонус удачи: 🍀 **+{new_user['luck_bonus']:.2f}**"
+            ),
+            color=discord.Color.green(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class ChestShopView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Это меню не для вас!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Обычный", emoji="🎁", style=discord.ButtonStyle.secondary)
+    async def buy_common(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, "Common")
+
+    @discord.ui.button(label="Mega", emoji="📦", style=discord.ButtonStyle.blurple)
+    async def buy_mega(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, "Mega")
+
+    @discord.ui.button(label="Ultra", emoji="💎", style=discord.ButtonStyle.blurple)
+    async def buy_ultra(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, "Ultra")
+
+    @discord.ui.button(label="Super", emoji="⚡", style=discord.ButtonStyle.blurple)
+    async def buy_super(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, "Super")
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_store_main_embed(), view=StoreView(self.user_id))
+
+    async def _buy(self, interaction: discord.Interaction, key: str):
+        item = SHOP_CHESTS[key]
+        user = await get_user(self.user_id)
+
+        if user["money"] < item["price"]:
+            await interaction.response.send_message(
+                f"❌ Недостаточно монет! Нужно **{item['price']}**, у вас **{user['money']}**.",
+                ephemeral=True,
+            )
+            return
+
+        await update_user(self.user_id, money=-item["price"])
+        await add_item(self.user_id, "chest", key, item["qty"])
+        new_user = await get_user(self.user_id)
+
+        embed = discord.Embed(
+            title="✅ Покупка успешна!",
+            description=(
+                f"Куплено: **{item['name']}** ×{item['qty']}\n"
+                f"Баланс: 💰 **{new_user['money']}**"
+            ),
+            color=discord.Color.green(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class FertShopView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Это меню не для вас!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Fast", emoji="🌱", style=discord.ButtonStyle.green)
+    async def buy_fast(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, "Fast")
+
+    @discord.ui.button(label="Fast x2", emoji="🌿", style=discord.ButtonStyle.green)
+    async def buy_fast2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, "Fast x2")
+
+    @discord.ui.button(label="Fast x4", emoji="🍀", style=discord.ButtonStyle.green)
+    async def buy_fast4(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, "Fast x4")
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_store_main_embed(), view=StoreView(self.user_id))
+
+    async def _buy(self, interaction: discord.Interaction, key: str):
+        item = SHOP_FERT[key]
+        user = await get_user(self.user_id)
+
+        if user["money"] < item["price"]:
+            await interaction.response.send_message(
+                f"❌ Недостаточно монет! Нужно **{item['price']}**, у вас **{user['money']}**.",
+                ephemeral=True,
+            )
+            return
+
+        await update_user(self.user_id, money=-item["price"])
+        await add_item(self.user_id, "fertilizer", key, item["qty"])
+        new_user = await get_user(self.user_id)
+
+        embed = discord.Embed(
+            title="✅ Покупка успешна!",
+            description=(
+                f"Куплено: **{item['name']}** ×{item['qty']}\n"
+                f"Баланс: 💰 **{new_user['money']}**"
+            ),
+            color=discord.Color.green(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ============================================================
+# МЕНЮ КРАФТА
+# ============================================================
+
+class CraftView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self._add_buttons()
+
+    def _add_buttons(self):
+        for key, recipe in CRAFT_RECIPES.items():
+            button = discord.ui.Button(
+                label=recipe["name"],
+                style=discord.ButtonStyle.green,
+                custom_id=f"craft_{key}",
+            )
+            button.callback = self._make_callback(key)
+            self.add_item(button)
+
+    def _make_callback(self, key: str):
+        async def callback(interaction: discord.Interaction):
+            recipe = CRAFT_RECIPES[key]
+            item_type = "chest" if key in ("Common", "Mega", "Ultra") else "fertilizer"
+
+            have = await get_item_quantity(self.user_id, item_type, key)
+            if have < recipe["need"]:
+                await interaction.response.send_message(
+                    f"❌ Нужно **{recipe['need']}x {key}**, у вас **{have}**.",
+                    ephemeral=True,
+                )
+                return
+
+            ok = await remove_item(self.user_id, item_type, key, recipe["need"])
+            if not ok:
+                await interaction.response.send_message("❌ Не удалось списать предметы.", ephemeral=True)
+                return
+
+            give_type = "chest" if recipe["give"] in ("Common", "Mega", "Ultra", "Super") else "fertilizer"
+            await add_item(self.user_id, give_type, recipe["give"], 1)
+
+            embed = discord.Embed(
+                title="🔨 Крафт успешен!",
+                description=f"{recipe['name']}\n\nПолучено: **{recipe['give']}** ×1",
+                color=discord.Color.green(),
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        return callback
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Это меню не для вас!", ephemeral=True)
+            return False
+        return True
+
+
+def build_craft_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🔨 Крафт",
+        description="Обменяй 3 предмета на 1 более редкий.",
+        color=discord.Color.orange(),
+    )
+    for recipe in CRAFT_RECIPES.values():
+        embed.add_field(name=recipe["name"], value="\u200b", inline=False)
+    return embed
+
+
+# ============================================================
 # АДМИН-КОМАНДЫ
 # ============================================================
 
@@ -374,7 +698,6 @@ async def money_drop(interaction: discord.Interaction, amount: int, member: disc
     debug_roles(interaction)
     if not has_admin_role(interaction):
         return await deny(interaction)
-
     target = member or interaction.user
     await update_user(target.id, money=amount)
     await interaction.response.send_message(f"✅ {target.mention} получил **{amount}** монет!")
@@ -388,14 +711,11 @@ async def money_drop(interaction: discord.Interaction, amount: int, member: disc
     app_commands.Choice(name="Ultra", value="Ultra"),
     app_commands.Choice(name="Super", value="Super"),
 ])
-async def chest_drop(
-    interaction: discord.Interaction, count: int,
-    chest_type: app_commands.Choice[str], member: discord.Member = None,
-):
+async def chest_drop(interaction: discord.Interaction, count: int,
+                     chest_type: app_commands.Choice[str], member: discord.Member = None):
     debug_roles(interaction)
     if not has_admin_role(interaction):
         return await deny(interaction)
-
     target = member or interaction.user
     await add_item(target.id, "chest", chest_type.value, count)
     await interaction.response.send_message(
@@ -411,154 +731,10 @@ async def chest_drop(
     app_commands.Choice(name="Ultra", value="Ultra"),
     app_commands.Choice(name="Super", value="Super"),
 ])
-async def give_chest(
-    interaction: discord.Interaction, count: int,
-    chest_type: app_commands.Choice[str], member: discord.Member,
-):
+async def give_chest(interaction: discord.Interaction, count: int,
+                     chest_type: app_commands.Choice[str], member: discord.Member):
     debug_roles(interaction)
     if not has_admin_role(interaction):
         return await deny(interaction)
-
     await add_item(member.id, "chest", chest_type.value, count)
-    await interaction.response.send_message(
-        f"✅ {member.mention} получил **{count}x {chest_type.value}** сундук(ов)!"
-    )
-
-
-@tree.command(name="remove-chest", description="Удалить сундуки у пользователя")
-@app_commands.describe(count="Количество", chest_type="Тип сундука", member="Кому")
-@app_commands.choices(chest_type=[
-    app_commands.Choice(name="Обычный (Common)", value="Common"),
-    app_commands.Choice(name="Mega", value="Mega"),
-    app_commands.Choice(name="Ultra", value="Ultra"),
-    app_commands.Choice(name="Super", value="Super"),
-])
-async def remove_chest(
-    interaction: discord.Interaction, count: int,
-    chest_type: app_commands.Choice[str], member: discord.Member,
-):
-    debug_roles(interaction)
-    if not has_admin_role(interaction):
-        return await deny(interaction)
-
-    ok = await remove_item(member.id, "chest", chest_type.value, count)
-    if ok:
-        await interaction.response.send_message(
-            f"✅ У {member.mention} удалено **{count}x {chest_type.value}**!"
-        )
-    else:
-        await interaction.response.send_message(
-            f"❌ У {member.mention} недостаточно **{chest_type.value}** сундуков!"
-        )
-
-
-@tree.command(name="tree-grow-up", description="Увеличить уровень дерева")
-@app_commands.describe(amount="Насколько увеличить", member="Кому (по умолчанию — вы)")
-async def tree_grow_up(interaction: discord.Interaction, amount: int, member: discord.Member = None):
-    debug_roles(interaction)
-    if not has_admin_role(interaction):
-        return await deny(interaction)
-
-    target = member or interaction.user
-    await update_user(target.id, tree_level=amount)
-    await interaction.response.send_message(
-        f"✅ Дерево {target.mention} выросло на **{amount}** уровней!"
-    )
-
-
-# ============================================================
-# КОМАНДЫ УЧАСТНИКОВ
-# ============================================================
-
-@tree.command(name="chests", description="Показать и открыть ваши сундуки")
-async def chests(interaction: discord.Interaction):
-    embed = await build_chests_embed(interaction.user.id, interaction.user)
-    view = ChestView(interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view)
-
-
-@tree.command(name="balance", description="Показать ваш баланс монет")
-@app_commands.describe(member="Чей баланс показать (по умолчанию — ваш)")
-async def balance(interaction: discord.Interaction, member: discord.Member = None):
-    target = member or interaction.user
-    data = await get_user(target.id)
-
-    embed = discord.Embed(title="💰 Баланс", color=discord.Color.gold())
-    embed.set_author(name=target.display_name, icon_url=target.display_avatar.url)
-    embed.add_field(name="Монеты", value=f"**{data['money']}** 💰", inline=False)
-    await interaction.response.send_message(embed=embed)
-
-
-@tree.command(name="tree", description="Показать ваше дерево и использовать удобрения")
-async def tree_info(interaction: discord.Interaction):
-    embed = await build_tree_embed(interaction.user.id, interaction.user)
-    view = TreeView(interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view)
-
-
-@tree.command(name="inventory", description="Показать весь инвентарь")
-async def inventory(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    data = await get_user(user_id)
-    inv = await get_inventory(user_id)
-
-    chest_map = {c["name"]: c["quantity"] for c in inv if c["type"] == "chest"}
-    fert_map = {f["name"]: f["quantity"] for f in inv if f["type"] == "fertilizer"}
-
-    luck = calc_luck(data["tree_level"])
-
-    embed = discord.Embed(title="🎒 Инвентарь", color=discord.Color.purple())
-    embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-
-    embed.add_field(
-        name="📊 Общее",
-        value=(
-            f"💰 Монеты: **{data['money']}**\n"
-            f"🌳 Уровень дерева: **{data['tree_level']}**\n"
-            f"🍀 Удача: **×{luck:.2f}**"
-        ),
-        inline=False,
-    )
-
-    chest_text = "\n".join(f"📦 {name}: **{qty}**" for name, qty in chest_map.items()) or "Пусто"
-    embed.add_field(name="🎁 Сундуки", value=chest_text, inline=False)
-
-    fert_text = "\n".join(f"{_fert_emoji(name)} {name}: **{qty}**" for name, qty in fert_map.items()) or "Пусто"
-    embed.add_field(name="🌱 Удобрения", value=fert_text, inline=False)
-
-    await interaction.response.send_message(embed=embed)
-
-
-# ============================================================
-# СОБЫТИЯ
-# ============================================================
-
-@bot.event
-async def on_ready():
-    await init_db()
-    await tree.sync()
-    print(f"✅ Бот {bot.user} запущен!")
-    print(f"📋 Команд зарегистрировано: {len(tree.get_commands())}")
-
-
-@bot.event
-async def on_disconnect():
-    await close_db()
-
-
-# ============================================================
-# ЗАПУСК
-# ============================================================
-
-if __name__ == "__main__":
-    raw = os.environ.get("DISCORD_TOKEN", "")
-    print(f"🔍 ENV    : длина={len(raw)}, начало={raw[:8]!r}, конец={raw[-4:]!r}")
-    if TOKEN:
-        print(f"🔍 CONFIG : длина={len(TOKEN)}, начало={TOKEN[:8]!r}")
-        print(f"🔍 MATCH  : {'✅ да' if TOKEN == raw else '❌ НЕТ'}")
-    if not TOKEN:
-        raise SystemExit("❌ DISCORD_TOKEN пустой!")
-    if len(TOKEN) < 50:
-        raise SystemExit(f"❌ DISCORD_TOKEN короткий: {len(TOKEN)} символов")
-
-    bot.run(TOKEN)
+    await interaction
