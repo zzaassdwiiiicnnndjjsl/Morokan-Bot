@@ -191,50 +191,112 @@ async def get_item_quantity(user_id: int, item_type: str, item_name: str) -> int
 # ИГРОВАЯ ЛОГИКА
 # ============================================================
 
-async def drop_chest_reward(user_id: int, count: int) -> list:
-    """Возвращает награды с учётом удачи (дерево + магазин)."""
+async def drop_chest_reward(user_id: int, chest_type: str, count: int) -> list:
+    """Возвращает награды в зависимости от типа открытого сундука и удачи."""
     _ensure_pool()
 
     user = await get_user(user_id)
     tree_level = user["tree_level"]
     shop_luck = user["luck_bonus"]
 
-    # Удача от дерева: +2% за уровень, максимум ×5
+    # Удача: от дерева + купленная, максимум ×10
     tree_luck = min(1 + tree_level * 0.02, 5.0)
-    # Итоговая удача: дерево + магазин, максимум ×10
     luck_bonus = min(tree_luck + shop_luck, 10.0)
 
-    # Веса: money, Common, Mega, Ultra, Super, Fast, Fast x2, Fast x4
-    base_weights = [40, 30, 15, 8, 2, 3, 1.5, 0.5]
-    weights = [
-        base_weights[0],                 # 💰 деньги — без изменений
-        base_weights[1] / luck_bonus,    # 🎁 Common — реже
-        base_weights[2] * luck_bonus,    # 📦 Mega
-        base_weights[3] * luck_bonus,    # 💎 Ultra
-        base_weights[4] * luck_bonus,    # ⚡ Super
-        base_weights[5] * luck_bonus,    # 🌱 Fast
-        base_weights[6] * luck_bonus,    # 🌿 Fast x2
-        base_weights[7] * luck_bonus,    # 🍀 Fast x4
-    ]
+    # Разные лут-столы для разных сундуков
+    # (money_range, [(drop, weight), ...])
+    loot_tables = {
+        "Common": {
+            "money": (5, 25),
+            "drops": [
+                ("Common",  40),
+                ("Mega",    25),
+                ("Fast",    20),
+                ("Ultra",   10),
+                ("Fast x2", 5),
+            ],
+        },
+        "Mega": {
+            "money": (20, 80),
+            "drops": [
+                ("Mega",    35),
+                ("Ultra",   30),
+                ("Fast",    10),
+                ("Fast x2", 15),
+                ("Super",   8),
+                ("Fast x4", 2),
+            ],
+        },
+        "Ultra": {
+            "money": (80, 250),
+            "drops": [
+                ("Ultra",   40),
+                ("Super",   25),
+                ("Fast x2", 15),
+                ("Fast x4", 12),
+                ("Mega",    8),
+            ],
+        },
+        "Super": {
+            "money": (300, 800),
+            "drops": [
+                ("Super",   45),
+                ("Ultra",   25),
+                ("Fast x4", 20),
+                ("Fast x2", 8),
+                ("Mega",    2),
+            ],
+        },
+    }
+
+    table = loot_tables.get(chest_type, loot_tables["Common"])
+    drops = table["drops"]
+    money_min, money_max = table["money"]
+
+    # Применяем удачу: редкие дропы (кроме Common и Mega) получают буст
+    rare_items = {"Ultra", "Super", "Fast x2", "Fast x4"}
+    weights = []
+    for name, w in drops:
+        if name in rare_items:
+            weights.append(w * luck_bonus)
+        else:
+            weights.append(w / max(luck_bonus ** 0.5, 1.0))  # Common/Mega чуть реже
 
     rewards = []
     for _ in range(count):
-        drop = random.choices(
-            ["money", "Common", "Mega", "Ultra", "Super",
-             "Fast", "Fast x2", "Fast x4"],
-            weights=weights, k=1,
-        )[0]
-
-        if drop == "money":
-            amt = random.randint(10, 100)
+        # 25% шанс что вообще деньги, иначе — предмет
+        if random.random() < 0.25:
+            amt = random.randint(money_min, money_max)
             await update_user(user_id, money=amt)
             rewards.append({"kind": "money", "amount": amt})
-        elif drop in ("Common", "Mega", "Ultra", "Super"):
+            continue
+
+        drop = random.choices(
+            [d[0] for d in drops],
+            weights=weights,
+            k=1,
+        )[0]
+
+        if drop in ("Common", "Mega", "Ultra", "Super"):
             await add_item(user_id, "chest", drop, 1)
             rewards.append({"kind": "chest", "name": drop, "amount": 1})
         else:
             await add_item(user_id, "fertilizer", drop, 1)
             rewards.append({"kind": "fertilizer", "name": drop, "amount": 1})
+
+    # Super-сундук: гарантированный бонусный редкий дроп сверху
+    if chest_type == "Super" and count >= 1:
+        bonus_drop = random.choices(
+            ["Ultra", "Super", "Fast x4"],
+            weights=[50, 30, 20],
+            k=1,
+        )[0]
+        if bonus_drop in ("Ultra", "Super"):
+            await add_item(user_id, "chest", bonus_drop, 1)
+            rewards.append({"kind": "chest", "name": bonus_drop, "amount": 1, "bonus": True})
+        else:
+            await add_item(user_id, "fertilizer", bonus_drop, 1)
+            rewards.append({"kind": "fertilizer", "name": bonus_drop, "amount": 1, "bonus": True})
 
     return rewards
 
