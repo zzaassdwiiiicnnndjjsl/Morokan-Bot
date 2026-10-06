@@ -83,20 +83,23 @@ async def get_user(user_id: int) -> dict:
     _ensure_pool()
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT money, tree_level FROM users WHERE user_id = $1", user_id
+            "SELECT money, tree_level, luck_bonus FROM users WHERE user_id = $1", user_id
         )
         if row is None:
             await conn.execute(
-                "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                user_id,
+                "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id,
             )
-            return {"money": 0, "tree_level": 0}
-        return {"money": row["money"], "tree_level": row["tree_level"]}
+            return {"money": 0, "tree_level": 0, "luck_bonus": 0.0}
+        return {
+            "money": row["money"],
+            "tree_level": row["tree_level"],
+            "luck_bonus": row["luck_bonus"],
+        }
 
 
-async def update_user(user_id: int, money: int = None, tree_level: int = None):
+async def update_user(user_id: int, money: int = None, tree_level: int = None, luck_bonus: float = None):
     _ensure_pool()
-    await get_user(user_id)  # убедимся что пользователь существует
+    await get_user(user_id)
     async with _pool.acquire() as conn:
         if money is not None:
             await conn.execute(
@@ -107,6 +110,11 @@ async def update_user(user_id: int, money: int = None, tree_level: int = None):
             await conn.execute(
                 "UPDATE users SET tree_level = tree_level + $1 WHERE user_id = $2",
                 tree_level, user_id,
+            )
+        if luck_bonus is not None:
+            await conn.execute(
+                "UPDATE users SET luck_bonus = luck_bonus + $1 WHERE user_id = $2",
+                luck_bonus, user_id,
             )
 
 
