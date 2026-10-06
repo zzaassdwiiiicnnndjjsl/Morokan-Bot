@@ -237,3 +237,62 @@ async def drop_chest_reward(user_id: int, count: int) -> list:
             rewards.append({"kind": "fertilizer", "name": drop, "amount": 1})
 
     return rewards
+
+# ============================================================
+# ТОП ИГРОКОВ И АДМИН-ФУНКЦИИ
+# ============================================================
+
+async def get_top_players(limit: int = 10) -> list:
+    """Топ игроков по балансу."""
+    _ensure_pool()
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT user_id, money, tree_level FROM users
+            ORDER BY money DESC
+            LIMIT $1
+        """, limit)
+        return [dict(r) for r in rows]
+
+
+async def set_user_money(user_id: int, amount: int):
+    """Установить баланс (абсолютное значение)."""
+    _ensure_pool()
+    await get_user(user_id)
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET money = $1 WHERE user_id = $2",
+            amount, user_id,
+        )
+
+
+async def set_user_tree(user_id: int, level: int):
+    """Установить уровень дерева (абсолютное значение)."""
+    _ensure_pool()
+    await get_user(user_id)
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET tree_level = $1 WHERE user_id = $2",
+            level, user_id,
+        )
+
+
+async def set_user_luck(user_id: int, value: float):
+    """Установить бонус удачи магазина (абсолютное значение)."""
+    _ensure_pool()
+    await get_user(user_id)
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET luck_bonus = $1 WHERE user_id = $2",
+            value, user_id,
+        )
+
+
+async def set_last_daily(user_id: int, when):
+    """Сохранить время последней ежедневной награды."""
+    _ensure_pool()
+    await get_user(user_id)
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET last_daily = $1 WHERE user_id = $2",
+            when, user_id,
+        )
