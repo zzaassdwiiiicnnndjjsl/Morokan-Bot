@@ -28,7 +28,6 @@ async def init_db():
                 max_size=10,
                 command_timeout=30,
             )
-            # Проверим, что пул реально работает
             async with _pool.acquire() as conn:
                 await conn.execute("SELECT 1")
             print(f"✅ PostgreSQL подключен (попытка {attempt})")
@@ -41,15 +40,18 @@ async def init_db():
                 print("❌ Не удалось подключиться к PostgreSQL")
                 raise
 
-    # Создаём таблицы
+    # Создаём таблицы + миграции
     async with _pool.acquire() as conn:
+        # users
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
                 money BIGINT NOT NULL DEFAULT 0,
-                tree_level INT NOT NULL DEFAULT 0
+                tree_level INT NOT NULL DEFAULT 0,
+                luck_bonus FLOAT NOT NULL DEFAULT 0
             )
         """)
+        # inventory
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS inventory (
                 user_id BIGINT NOT NULL,
@@ -58,6 +60,10 @@ async def init_db():
                 quantity INT NOT NULL DEFAULT 0,
                 PRIMARY KEY (user_id, item_type, item_name)
             )
+        """)
+        # миграции для старых таблиц (если колонки нет — добавляем)
+        await conn.execute("""
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS luck_bonus FLOAT NOT NULL DEFAULT 0
         """)
     print("✅ Таблицы готовы")
 
@@ -83,11 +89,13 @@ async def get_user(user_id: int) -> dict:
     _ensure_pool()
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT money, tree_level, luck_bonus FROM users WHERE user_id = $1", user_id
+            "SELECT money, tree_level, luck_bonus FROM users WHERE user_id = $1",
+            user_id,
         )
         if row is None:
             await conn.execute(
-                "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id,
+                "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                user_id,
             )
             return {"money": 0, "tree_level": 0, "luck_bonus": 0.0}
         return {
@@ -97,7 +105,12 @@ async def get_user(user_id: int) -> dict:
         }
 
 
-async def update_user(user_id: int, money: int = None, tree_level: int = None, luck_bonus: float = None):
+async def update_user(
+    user_id: int,
+    money: int = None,
+    tree_level: int = None,
+    luck_bonus: float = None,
+):
     _ensure_pool()
     await get_user(user_id)
     async with _pool.acquire() as conn:
@@ -159,7 +172,7 @@ async def remove_item(user_id: int, item_type: str, item_name: str, quantity: in
             UPDATE inventory
             SET quantity = quantity - $1
             WHERE user_id = $2 AND item_type = $3 AND item_name = $4
-            AND quantity >= $1
+              AND quantity >= $1
         """, quantity, user_id, item_type, item_name)
         return result.endswith("1")
 
@@ -179,28 +192,29 @@ async def get_item_quantity(user_id: int, item_type: str, item_name: str) -> int
 # ============================================================
 
 async def drop_chest_reward(user_id: int, count: int) -> list:
-    """Возвращает список наград с учётом удачи от уровня дерева."""
+    """Возвращает награды с учётом удачи (дерево + магазин)."""
     _ensure_pool()
 
     user = await get_user(user_id)
     tree_level = user["tree_level"]
+    shop_luck = user["luck_bonus"]
 
-    # Бонус удачи: +2% к редким за каждый уровень дерева (макс. ×5)
-    luck_bonus = min(1 + tree_level * 0.02, 5.0)
+    # Удача от дерева: +2% за уровень, максимум ×5
+    tree_luck = min(1 + tree_level * 0.02, 5.0)
+    # Итоговая удача: дерево + магазин, максимум ×10
+    luck_bonus = min(tree_luck + shop_luck, 10.0)
 
-    # Базовые веса: money, Common, Mega, Ultra, Super, Fast, Fast x2, Fast x4
+    # Веса: money, Common, Mega, Ultra, Super, Fast, Fast x2, Fast x4
     base_weights = [40, 30, 15, 8, 2, 3, 1.5, 0.5]
-
-    # Редкие получают буст удачи, обычные — ослабляются
     weights = [
-        base_weights[0],                # 💰 деньги — без изменений
-        base_weights[1] / luck_bonus,   # 🎁 Common — реже
-        base_weights[2] * luck_bonus,   # 📦 Mega
-        base_weights[3] * luck_bonus,   # 💎 Ultra
-        base_weights[4] * luck_bonus,   # ⚡ Super
-        base_weights[5] * luck_bonus,   # 🌱 Fast
-        base_weights[6] * luck_bonus,   # 🌿 Fast x2
-        base_weights[7] * luck_bonus,   # 🍀 Fast x4
+        base_weights[0],                 # 💰 деньги — без изменений
+        base_weights[1] / luck_bonus,    # 🎁 Common — реже
+        base_weights[2] * luck_bonus,    # 📦 Mega
+        base_weights[3] * luck_bonus,    # 💎 Ultra
+        base_weights[4] * luck_bonus,    # ⚡ Super
+        base_weights[5] * luck_bonus,    # 🌱 Fast
+        base_weights[6] * luck_bonus,    # 🌿 Fast x2
+        base_weights[7] * luck_bonus,    # 🍀 Fast x4
     ]
 
     rewards = []
@@ -208,20 +222,17 @@ async def drop_chest_reward(user_id: int, count: int) -> list:
         drop = random.choices(
             ["money", "Common", "Mega", "Ultra", "Super",
              "Fast", "Fast x2", "Fast x4"],
-            weights=weights,
-            k=1,
+            weights=weights, k=1,
         )[0]
 
         if drop == "money":
             amt = random.randint(10, 100)
             await update_user(user_id, money=amt)
             rewards.append({"kind": "money", "amount": amt})
-
         elif drop in ("Common", "Mega", "Ultra", "Super"):
             await add_item(user_id, "chest", drop, 1)
             rewards.append({"kind": "chest", "name": drop, "amount": 1})
-
-        else:  # Fast, Fast x2, Fast x4
+        else:
             await add_item(user_id, "fertilizer", drop, 1)
             rewards.append({"kind": "fertilizer", "name": drop, "amount": 1})
 
